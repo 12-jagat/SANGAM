@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.express as px
-import os
 from datetime import datetime
 from sqlite3 import Error
 
@@ -23,18 +22,15 @@ st.markdown(
 DB_FILE = "sales_data.db"
 
 def setup_database():
-    """Initialize SQLite database with normalized column names."""
+    """Initialize SQLite database."""
     conn = sqlite3.connect(DB_FILE)
     try:
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS datasets (
+        conn.execute("""CREATE TABLE IF NOT EXISTS datasets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE,
             upload_date TEXT
-        )
-        """)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS sales_data (
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS sales_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             dataset_id INTEGER,
             order_date TEXT,
@@ -46,8 +42,7 @@ def setup_database():
             quantity INTEGER,
             discount REAL,
             FOREIGN KEY(dataset_id) REFERENCES datasets(id)
-        )
-        """)
+        )""")
         conn.commit()
     except Error as e:
         st.error(f"Database setup error: {e}")
@@ -57,28 +52,34 @@ def setup_database():
 setup_database()
 
 # Utility Functions
-def load_data(file):
-    """Load data from the uploaded file."""
-    try:
-        ext = file.name.split('.')[-1]
-        if ext == "csv":
-            return pd.read_csv(file, encoding="ISO-8859-1")
-        elif ext in ["xls", "xlsx"]:
-            return pd.read_excel(file)
-        else:
-            st.error("Unsupported file format. Upload a CSV or Excel file.")
-            return None
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return None
-
-def normalize_column_names(dataframe):
-    """Normalize column names to lowercase with underscores."""
+def normalize_and_map_columns(dataframe):
+    """
+    Normalize column names and map them to the expected schema.
+    """
+    # Normalize column names
     dataframe.columns = dataframe.columns.str.strip().str.lower().str.replace(" ", "_")
+
+    # Define a mapping from expected names to normalized names
+    column_mapping = {
+        "order_date": "order_date",
+        "sales": "sales",
+        "profit": "profit",
+        "category": "category",
+        "region": "region",
+        "sub-category": "sub_category",  # Handle variations
+        "subcategory": "sub_category",  # Handle alternative naming
+        "quantity": "quantity",
+        "discount": "discount"
+    }
+
+    # Rename columns based on the mapping
+    dataframe = dataframe.rename(columns=column_mapping)
     return dataframe
 
 def validate_columns(dataframe, required_columns):
-    """Check if required columns exist in the dataset."""
+    """
+    Check if required columns exist in the dataset.
+    """
     missing_columns = [col for col in required_columns if col not in dataframe.columns]
     if missing_columns:
         st.error(f"Missing required columns: {', '.join(missing_columns)}")
@@ -89,29 +90,15 @@ def save_to_database(dataset_name, dataframe):
     """Save uploaded dataset to the database."""
     conn = sqlite3.connect(DB_FILE)
     try:
-        # Normalize DataFrame columns
-        dataframe = normalize_column_names(dataframe)
-
-        # Ensure DataFrame contains only valid columns
-        valid_columns = [
-            "order_date", "sales", "profit", "category", "region", 
-            "sub_category", "quantity", "discount"
-        ]
-        dataframe = dataframe[valid_columns]
-
-        # Convert order_date to text (ensure compatibility with SQLite)
-        dataframe["order_date"] = dataframe["order_date"].astype(str)
-
         # Insert dataset record
         upload_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn.execute("INSERT INTO datasets (name, upload_date) VALUES (?, ?)", (dataset_name, upload_date))
         dataset_id = conn.execute("SELECT id FROM datasets WHERE name = ?", (dataset_name,)).fetchone()[0]
 
-        # Add dataset_id to DataFrame before inserting
-        dataframe["dataset_id"] = dataset_id
-
-        # Save data to the database
+        # Insert sales data with the dataset ID
+        dataframe["dataset_id"] = dataset_id  # Add dataset ID column to match the database schema
         dataframe.to_sql("sales_data", conn, if_exists="append", index=False,
+                         chunksize=1000,
                          dtype={
                              "order_date": "TEXT",
                              "sales": "REAL",
@@ -160,13 +147,14 @@ dataset_name = st.sidebar.text_input("Enter a unique name for the dataset")
 
 if st.sidebar.button("Upload Dataset"):
     if uploaded_file and dataset_name:
-        data = load_data(uploaded_file)
+        # Load and normalize data
+        data = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
         if data is not None:
-            # Required columns (normalized to snake_case)
-            required_columns = ["order_date", "sales", "profit", "category", "region", "sub_category", "quantity", "discount"]
+            # Normalize and map column names
+            data = normalize_and_map_columns(data)
 
-            # Normalize and validate the uploaded dataset
-            data = normalize_column_names(data)
+            # Validate required columns
+            required_columns = ["order_date", "sales", "profit", "category", "region", "sub_category", "quantity", "discount"]
             if validate_columns(data, required_columns):
                 # Convert order_date to datetime and drop invalid rows
                 data["order_date"] = pd.to_datetime(data["order_date"], errors="coerce")
@@ -189,6 +177,7 @@ if selected_dataset:
         st.dataframe(df.head())
 
         # Filters
+        df["order_date"] = pd.to_datetime(df["order_date"])  # Ensure proper datetime format
         start_date, end_date = st.date_input("Filter by Date Range:", [df["order_date"].min(), df["order_date"].max()])
         df_filtered = df[(df["order_date"] >= start_date) & (df["order_date"] <= end_date)]
 
